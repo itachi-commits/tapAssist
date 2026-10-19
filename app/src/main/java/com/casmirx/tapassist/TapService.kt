@@ -90,7 +90,7 @@ class TapService : AccessibilityService(), SharedPreferences.OnSharedPreferenceC
     }
 
     private fun add(v: View, key: String, defX: Int, defY: Int, size: Int, touchable: Boolean) {
-        var flags = LP.FLAG_NOT_FOCUSABLE or LP.FLAG_LAYOUT_IN_SCREEN or LP.FLAG_LAYOUT_NO_LIMITS
+      var flags = LP.FLAG_NOT_FOCUSABLE or LP.FLAG_LAYOUT_IN_SCREEN or LP.FLAG_LAYOUT_NO_LIMITS or LP.FLAG_SPLIT_TOUCH
         if (!touchable) flags = flags or LP.FLAG_NOT_TOUCHABLE
         val p = LP(size, size, LP.TYPE_ACCESSIBILITY_OVERLAY, flags, PixelFormat.TRANSLUCENT).apply {
             gravity = Gravity.TOP or Gravity.START
