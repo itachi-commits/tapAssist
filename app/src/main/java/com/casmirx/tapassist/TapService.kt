@@ -2,11 +2,20 @@ package com.casmirx.tapassist
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
@@ -19,20 +28,28 @@ import android.widget.TextView
 
 class TapService : AccessibilityService(), SharedPreferences.OnSharedPreferenceChangeListener {
 
+    private val ACTION = "com.casmirx.tapassist.TOGGLE"
+
     private lateinit var wm: WindowManager
     private lateinit var prefs: SharedPreferences
     private val handler = Handler(Looper.getMainLooper())
     private val all = mutableListOf<View>()
     private val markers = mutableListOf<View>()
     private var editBtn: TextView? = null
+    private var ctrlBtn: TextView? = null
     private var firing = false
     private var editMode = false
 
-    // drag state
     private var downX = 0f
     private var downY = 0f
     private var startX = 0
     private var startY = 0
+
+    private val receiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, i: Intent?) {
+            prefs.edit().putBoolean("show", !prefs.getBoolean("show", true)).apply()
+        }
+    }
 
     private val tapper = object : Runnable {
         override fun run() {
@@ -47,11 +64,18 @@ class TapService : AccessibilityService(), SharedPreferences.OnSharedPreferenceC
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         prefs = getSharedPreferences("tap", MODE_PRIVATE)
         prefs.registerOnSharedPreferenceChangeListener(this)
+        val filter = IntentFilter(ACTION)
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(receiver, filter)
+        }
         build()
     }
 
     override fun onSharedPreferenceChanged(p: SharedPreferences, key: String?) {
         if (key == "count") handler.post { build() }
+        if (key == "show") handler.post { applyShow() }
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -101,7 +125,6 @@ class TapService : AccessibilityService(), SharedPreferences.OnSharedPreferenceC
         val small = dp(44)
         val count = prefs.getInt("count", 1).coerceIn(1, 3)
 
-        // blue tap-point markers (pass touches through unless editing)
         for (i in 0 until count) {
             val m = bubble("${i + 1}", 0xFF2196F3.toInt())
             m.setOnTouchListener { v, e -> if (editMode) drag(v, "m$i", e) else false }
@@ -109,28 +132,68 @@ class TapService : AccessibilityService(), SharedPreferences.OnSharedPreferenceC
             markers += m
         }
 
-        // red hold-to-fire button
+        // FIRE: tap once to start, tap again to stop
         val ctrl = bubble("FIRE", 0xFFE53935.toInt())
         ctrl.setOnTouchListener { v, e ->
             if (editMode) return@setOnTouchListener drag(v, "c", e)
-            when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { firing = true; v.alpha = 1f; handler.post(tapper) }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { firing = false; v.alpha = 0.6f }
+            if (e.actionMasked == MotionEvent.ACTION_DOWN) {
+                firing = !firing
+                setFireLook()
+                if (firing) handler.post(tapper)
             }
             true
         }
         add(ctrl, "c", dm.widthPixels / 8, dm.heightPixels / 2, big, true)
+        ctrlBtn = ctrl
 
-        // pencil / check toggle for moving things around
         val edit = bubble("✎", 0xFF616161.toInt())
         edit.setOnClickListener { setEdit(!editMode) }
         add(edit, "e", dm.widthPixels / 8, dm.heightPixels / 2 - dp(60), small, true)
         editBtn = edit
+
+        applyShow()
+    }
+
+    private fun applyShow() {
+        val show = prefs.getBoolean("show", true)
+        if (!show && editMode) setEdit(false)
+        firing = false
+        setFireLook()
+        all.forEach { it.visibility = if (show) View.VISIBLE else View.GONE }
+        notif(show)
+    }
+
+    private fun notif(show: Boolean) {
+        val nm = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= 26) {
+            nm.createNotificationChannel(
+                NotificationChannel("tap", "Tap Assist", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
+        val pi = PendingIntent.getBroadcast(
+            this, 0, Intent(ACTION).setPackage(packageName),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, "tap")
+                else Notification.Builder(this)
+        val n = b.setSmallIcon(android.R.drawable.ic_menu_edit)
+            .setContentTitle("Tap Assist")
+            .setContentText(if (show) "Floating buttons are ON" else "Floating buttons are OFF")
+            .setOngoing(true)
+            .addAction(0, if (show) "Hide" else "Show", pi)
+            .build()
+        runCatching { nm.notify(1, n) }
+    }
+
+    private fun setFireLook() {
+        ctrlBtn?.text = if (firing) "STOP" else "FIRE"
+        ctrlBtn?.alpha = if (firing) 1f else 0.6f
     }
 
     private fun setEdit(on: Boolean) {
         editMode = on
         firing = false
+        setFireLook()
         editBtn?.text = if (on) "✓" else "✎"
         markers.forEach {
             val p = it.layoutParams as LP
@@ -151,12 +214,14 @@ class TapService : AccessibilityService(), SharedPreferences.OnSharedPreferenceC
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
-    override fun onInterrupt() { firing = false }
+    override fun onInterrupt() { firing = false; setFireLook() }
 
     override fun onDestroy() {
         firing = false
         prefs.unregisterOnSharedPreferenceChangeListener(this)
+        runCatching { unregisterReceiver(receiver) }
         all.forEach { runCatching { wm.removeView(it) } }
+        runCatching { getSystemService(NotificationManager::class.java).cancel(1) }
         super.onDestroy()
     }
 }
